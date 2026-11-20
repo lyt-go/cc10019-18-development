@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import threading
 from typing import Any
 
 from app.seed import SEED_ROWS
@@ -20,11 +21,36 @@ class Store:
         self._snapshots: dict[str, list[dict[str, Any]]] = {}
         # 计算结果缓存
         self._compute_cache: dict[str, dict[str, Any]] = {}
+        # 标签层级注册表：parent_tag_id -> 子标签编号列表（现行父子层级）
+        self._tag_hierarchy: dict[str, list[str]] = {}
+        # 下钻分组明细导出文件：export_id -> 文件
+        self._drill_exports: dict[str, dict[str, Any]] = {}
+        # 快照归档记录：archive_id -> 归档记录（含状态机与交付的文件）
+        self._snapshot_archives: dict[str, dict[str, Any]] = {}
+        # 归档串行化锁：同一归档编号的并发重试只允许一个执行确认流程
+        self._archive_locks: dict[str, threading.RLock] = {}
+        self._archive_locks_guard = threading.Lock()
+        self._reset_export_runtime()
         # 下一个自增ID
         self._next_ids: dict[str, int] = {
             name: max((int(row.get("id", 0)) for row in self._tables[name]), default=0) + 1
             for name in self._tables
         }
+
+    def _reset_export_runtime(self) -> None:
+        """初始化/重置导出归档相关的运行态存储。"""
+        self._tag_hierarchy = {}
+        for row in self._tables.get("tag_drill", []):
+            parent = row.get("parent_tag")
+            if not parent:
+                continue
+            children = self._tag_hierarchy.setdefault(parent, [])
+            for child in row.get("child_tags", []):
+                if child not in children:
+                    children.append(child)
+        self._drill_exports = {}
+        self._snapshot_archives = {}
+        self._archive_locks = {}
 
     def module_names(self) -> list[str]:
         return sorted(self._tables)
@@ -137,6 +163,57 @@ class Store:
         keys_to_remove = [k for k in self._compute_cache if k.startswith(prefix)]
         for k in keys_to_remove:
             del self._compute_cache[k]
+
+    # ========== 标签层级注册表 ==========
+    def get_tag_children(self, parent_tag: str) -> list[str]:
+        """读取某父标签下现行的子标签编号列表。"""
+        return list(self._tag_hierarchy.get(parent_tag, []))
+
+    def move_tag_to_parent(self, child_tag: str, new_parent: str) -> dict[str, Any]:
+        """把子标签转到新父级，返回迁移记录（旧父级可能为 None）。"""
+        old_parent: str | None = None
+        for parent, children in self._tag_hierarchy.items():
+            if child_tag in children:
+                old_parent = parent
+                children.remove(child_tag)
+                break
+        bucket = self._tag_hierarchy.setdefault(new_parent, [])
+        if child_tag not in bucket:
+            bucket.append(child_tag)
+        return {"child_tag": child_tag, "old_parent": old_parent, "new_parent": new_parent}
+
+    def snapshot_hierarchy(self) -> dict[str, list[str]]:
+        """导出现行层级的深拷贝快照。"""
+        return {parent: list(children) for parent, children in self._tag_hierarchy.items()}
+
+    # ========== 下钻分组明细导出文件 ==========
+    def save_drill_export(self, export_file: dict[str, Any]) -> None:
+        self._drill_exports[export_file["export_id"]] = export_file
+
+    def get_drill_export(self, export_id: str) -> dict[str, Any] | None:
+        return self._drill_exports.get(export_id)
+
+    def list_drill_exports(self) -> list[dict[str, Any]]:
+        return list(self._drill_exports.values())
+
+    # ========== 快照归档 ==========
+    def get_archive(self, archive_id: str) -> dict[str, Any] | None:
+        return self._snapshot_archives.get(archive_id)
+
+    def save_archive(self, record: dict[str, Any]) -> None:
+        self._snapshot_archives[record["archive_id"]] = record
+
+    def list_archives(self) -> list[dict[str, Any]]:
+        return list(self._snapshot_archives.values())
+
+    def archive_lock(self, archive_id: str) -> threading.RLock:
+        """获取某归档编号专属的可重入锁，串行化并发重试。"""
+        with self._archive_locks_guard:
+            lock = self._archive_locks.get(archive_id)
+            if lock is None:
+                lock = threading.RLock()
+                self._archive_locks[archive_id] = lock
+            return lock
 
     # ========== 跨模块关联查询 ==========
     def join(self, left_module: str, right_module: str, left_field: str, right_field: str) -> list[dict[str, Any]]:

@@ -35,6 +35,31 @@ class ActionPayload(BaseModel):
     remark: str | None = None
 
 
+class DrillExportPayload(BaseModel):
+    """标签下钻分组明细导出准备请求：可指定某次下钻运行，缺省取最新一次。"""
+
+    drill_run_id: str | None = Field(None, description="下钻运行编号；不传则使用该配置最新一次运行")
+
+
+class TagMovePayload(BaseModel):
+    """标签层级调整请求：把子标签转到新父级。"""
+
+    child_tag: str = Field(..., description="待迁移的子标签编号")
+    new_parent: str = Field(..., description="新父标签编号")
+
+
+class ArchiveSubmitPayload(BaseModel):
+    """快照归档请求：携带完整分组明细文件，同一归档编号幂等交付。"""
+
+    archive_id: str = Field(..., description="归档编号，重试时必须保持不变")
+    export_file: dict[str, Any] = Field(..., description="完整的分组明细导出文件")
+    snapshot_id: str | None = Field(None, description="挂接的快照编号；不传则自动新建")
+    simulate_failure: str | None = Field(
+        None,
+        description="故障注入：after_write（写入后失败）/before_confirm（确认前中断）",
+    )
+
+
 # ========== 属性字典 ==========
 class AttrDictEntry(BaseModel):
     """属性定义：描述用户属性字段的元数据。"""

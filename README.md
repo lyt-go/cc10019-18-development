@@ -75,5 +75,26 @@ npm run dev
 - 列表接口统一返回 `{ items, total, page, size }`，动作接口统一返回 `{ ok, message }`。
 - 状态流转只允许在 `app/services` 里改，路由层不做业务判断。
 
+## 标签下钻分组明细导出与快照归档
+
+标签下钻支持把一次统计结果导出为**可复核的分组明细文件**，并通过标签快照归档交付：
+
+- `POST /api/tag-drill/{config_id}/run`：执行下钻，每次运行产生独立 `drill_run_id`，历史运行不覆盖。
+- `POST /api/tag-drill/{config_id}/prepare-export`：从同一次下钻准备分组明细文件，冻结
+  父子标签版本、分组口径（维度+统计方式）、统计值、原始结果编号（`source_result_id`）
+  以及导出时的父子层级快照；可传 `drill_run_id` 指定历史运行。
+- `GET /api/tag-drill/exports`、`GET /api/tag-drill/exports/{export_id}`：列出/下载导出文件。
+- `POST /api/tag-drill/move-tag`：子标签转到新父级，用于制造历史下钻与现行层级冲突；
+  已生成文件保留旧层级，冲突在文件与归档视图中标注。
+- `POST /api/tag-snapshot/archives`：归档请求携带**完整**分组明细文件。同一 `archive_id`
+  并发或重试只确认交付一份快照（按归档编号加锁、幂等），确认后重复请求返回原文件；
+  附件缺字段返回 422。可传 `simulate_failure=after_write|before_confirm` 模拟写入后失败。
+- `GET /api/tag-snapshot/archives/{archive_id}/download`：附件完整确认后才可下载，否则 409。
+- `GET /api/tag-snapshot/archives/{archive_id}/trace`：下钻来源回查，逐条核对归档统计值
+  与当次下钻原始结果编号，未确认同样返回 409。
+
+测试：`backend/tests/test_drill_export_archive.py`（服务层）与
+`backend/tests/test_drill_export_api.py`（内嵌 uvicorn 的 HTTP 级，含并发与失败重试）。
+
 领域：数据工程
 子方向：数据分析与数据应用
